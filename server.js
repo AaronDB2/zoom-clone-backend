@@ -4,40 +4,52 @@ const { v4: uuidv4 } = require("uuid");
 const cors = require("cors");
 const twilio = require("twilio");
 
-// Define PORT
-const PORT = process.env.PORT || 3001;
-
-// Init express app
+const PORT = process.env.PORT || 5002;
 const app = express();
-
-// Create HTTP server
 const server = http.createServer(app);
 
-// Middleware for CORS
 app.use(cors());
 
-var connectedUsers = [];
-var rooms = [];
+let connectedUsers = [];
+let rooms = [];
 
-// Create route to check if room exists
+// create route to check if room exists
 app.get("/api/room-exists/:roomId", (req, res) => {
   const { roomId } = req.params;
   const room = rooms.find((room) => room.id === roomId);
 
-  // Check if room exists
   if (room) {
-    // Check if room is full
+    // send reponse that room exists
     if (room.connectedUsers.length > 3) {
       return res.send({ roomExists: true, full: true });
     } else {
       return res.send({ roomExists: true, full: false });
     }
   } else {
+    // send response that room does not exists
     return res.send({ roomExists: false });
   }
 });
 
-// Init socket
+// Get Twillio crendentials
+app.get("/api/get-turn-credentials", (req, res) => {
+  const accountSid = ""; //fill in twillio accountSid here
+  const authToken = ""; //fill in twillio authtoken here
+
+  const client = twilio(accountSid, authToken);
+
+  res.send({ token: null });
+  try {
+    client.tokens.create().then((token) => {
+      res.send({ token });
+    });
+  } catch (err) {
+    console.log("error occurred when fetching turn server credentials");
+    console.log(err);
+    res.send({ token: null });
+  }
+});
+
 const io = require("socket.io")(server, {
   cors: {
     origin: "*",
@@ -45,94 +57,89 @@ const io = require("socket.io")(server, {
   },
 });
 
-// Listen for connections
 io.on("connection", (socket) => {
   console.log(`user connected ${socket.id}`);
 
-  // Listening for create-new-room event
   socket.on("create-new-room", (data) => {
     createNewRoomHandler(data, socket);
   });
 
-  // Listening for join-room event
   socket.on("join-room", (data) => {
     joinRoomHandler(data, socket);
   });
 
-  // Listening for disconnect event
-  socket.on("disconnect", (data) => {
+  socket.on("disconnect", () => {
     disconnectHandler(socket);
   });
 
-  // Listening for conn-signal event
   socket.on("conn-signal", (data) => {
     signalingHandler(data, socket);
   });
 
-  // Listening for conn-init event
   socket.on("conn-init", (data) => {
     initializeConnectionHandler(data, socket);
   });
+
+  socket.on("direct-message", (data) => {
+    directMessageHandler(data, socket);
+  });
 });
 
-// Socket.io handlers
+// socket.io handlers
 
-// Handler for creating a new room
 const createNewRoomHandler = (data, socket) => {
   console.log("host is creating new room");
   console.log(data);
+  const { identity, onlyAudio } = data;
 
-  const { identity } = data;
-
-  // Generate random UUID
   const roomId = uuidv4();
 
-  // Create new user
+  // create new user
   const newUser = {
     identity,
     id: uuidv4(),
     socketId: socket.id,
     roomId,
+    onlyAudio,
   };
 
-  // Push that user to connectedUsers
+  // push that user to connectedUsers
   connectedUsers = [...connectedUsers, newUser];
 
-  // Create new room
+  //create new room
   const newRoom = {
     id: roomId,
     connectedUsers: [newUser],
   };
-
-  // Join socket.io room
+  // join socket.io room
   socket.join(roomId);
 
   rooms = [...rooms, newRoom];
 
-  // Emit to client that created the room the roomID
+  // emit to that client which created that room roomId
   socket.emit("room-id", { roomId });
 
-  // Emit an event to all users connected to that room about a new user
+  // emit an event to all users connected
+  // to that room about new users which are right in this room
   socket.emit("room-update", { connectedUsers: newRoom.connectedUsers });
 };
 
-// Handler for joining a room
 const joinRoomHandler = (data, socket) => {
-  const { identity, roomId } = data;
+  const { identity, roomId, onlyAudio } = data;
 
-  // Create new user
   const newUser = {
     identity,
     id: uuidv4(),
     socketId: socket.id,
     roomId,
+    onlyAudio,
   };
 
-  // join room as user which is passing room id to join the room
+  // join room as user which just is trying to join room passing room id
   const room = rooms.find((room) => room.id === roomId);
   room.connectedUsers = [...room.connectedUsers, newUser];
 
-  // Join socket.io room
+  // join socket.io room
   socket.join(roomId);
 
   // add new user to connected users array
@@ -145,23 +152,21 @@ const joinRoomHandler = (data, socket) => {
         connUserSocketId: socket.id,
       };
 
-      io.to(roomId).emit("conn-prepare", data);
+      io.to(user.socketId).emit("conn-prepare", data);
     }
   });
 
-  // Send room-update event to all connected users in the room
   io.to(roomId).emit("room-update", { connectedUsers: room.connectedUsers });
 };
 
-// Handler for disconnecting from a room
 const disconnectHandler = (socket) => {
-  // Find if user has been registerd
-  // If yes remove him/her from room and connected users array
+  // find if user has been registered - if yes remove him from room and connected users array
   const user = connectedUsers.find((user) => user.socketId === socket.id);
 
   if (user) {
-    const room = rooms.find((room) => room.id === user.roomId);
     // remove user from room in server
+    const room = rooms.find((room) => room.id === user.roomId);
+
     room.connectedUsers = room.connectedUsers.filter(
       (user) => user.socketId !== socket.id
     );
@@ -169,12 +174,12 @@ const disconnectHandler = (socket) => {
     // leave socket io room
     socket.leave(user.roomId);
 
-    // close the room if there are no more users in the room
+    // close the room if amount of the users which will stay in room will be 0
     if (room.connectedUsers.length > 0) {
-      // emit to all users in the room that a user has disconnected
+      // emit to all users which are still in the room that user disconnected
       io.to(room.id).emit("user-disconnected", { socketId: socket.id });
 
-      // emit an event to the rest of the users in the room the updated connectedUsers array
+      // emit an event to rest of the users which left in the toom new connectedUsers in room
       io.to(room.id).emit("room-update", {
         connectedUsers: room.connectedUsers,
       });
@@ -184,16 +189,14 @@ const disconnectHandler = (socket) => {
   }
 };
 
-// Handler for signaling data
 const signalingHandler = (data, socket) => {
   const { connUserSocketId, signal } = data;
 
   const signalingData = { signal, connUserSocketId: socket.id };
-
   io.to(connUserSocketId).emit("conn-signal", signalingData);
 };
 
-// Handler for initializing connection
+// information from clients which are already in room that They have preapred for incoming connection
 const initializeConnectionHandler = (data, socket) => {
   const { connUserSocketId } = data;
 
@@ -201,7 +204,31 @@ const initializeConnectionHandler = (data, socket) => {
   io.to(connUserSocketId).emit("conn-init", initData);
 };
 
-// Start server
+const directMessageHandler = (data, socket) => {
+  if (
+    connectedUsers.find(
+      (connUser) => connUser.socketId === data.receiverSocketId
+    )
+  ) {
+    const receiverData = {
+      authorSocketId: socket.id,
+      messageContent: data.messageContent,
+      isAuthor: false,
+      identity: data.identity,
+    };
+    socket.to(data.receiverSocketId).emit("direct-message", receiverData);
+
+    const authorData = {
+      receiverSocketId: data.receiverSocketId,
+      messageContent: data.messageContent,
+      isAuthor: true,
+      identity: data.identity,
+    };
+
+    socket.emit("direct-message", authorData);
+  }
+};
+
 server.listen(PORT, () => {
   console.log(`Server is listening on ${PORT}`);
 });
